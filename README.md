@@ -2,7 +2,8 @@
 
 
 
-![[image-6.png]]
+<img width="668" height="481" alt="image" src="https://github.com/user-attachments/assets/a17b99d6-daae-4611-98f2-1dac2551482d" />
+
 
 
 
