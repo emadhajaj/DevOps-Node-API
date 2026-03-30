@@ -53,7 +53,7 @@ pipeline {
           // Log in to GHCR from Jenkins
           sh """
             echo "${GITHUB_TOKEN}" | docker login ${REGISTRY} \
-              -u "${GITHUB_TOKEN_USR}" \
+              -u "emadhajaj" \
               --password-stdin
           """
 
