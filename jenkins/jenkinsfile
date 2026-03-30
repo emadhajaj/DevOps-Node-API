@@ -199,14 +199,7 @@ pipeline {
   // ── Post Actions ─────────────────────────────────────────────────────────
   post {
     success {
-      echo """
-        =============================================
-        DEPLOYMENT SUCCESSFUL
-        Image: ${env.FULL_IMAGE}
-        Server: ${env.APP_SERVER_IP}
-        API: http://${env.APP_SERVER_IP}:${env.APP_PORT}/api/health
-        =============================================
-      """
+      echo "DEPLOYMENT SUCCESSFUL — ${env.FULL_IMAGE} deployed to ${env.APP_SERVER_IP}"
     }
     failure {
       echo "DEPLOYMENT FAILED — Check logs above for details"
@@ -215,9 +208,11 @@ pipeline {
     }
     always {
       // Log out of Docker registry
-      sh 'docker logout ${REGISTRY} || true'
-      // Clean workspace
-      cleanWs()
+      node('built-in'){
+          sh 'docker logout ghcr.io || true'
+          // Clean workspace
+          cleanWs()
+      }
     }
   }
 
