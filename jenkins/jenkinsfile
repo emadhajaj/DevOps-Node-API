@@ -15,7 +15,7 @@ pipeline {
   environment {
     REGISTRY       = "ghcr.io"
     IMAGE_NAME     = "emadhajaj/devops-node-api"   // CHANGE THIS
-    GITHUB_TOKEN   = credentials('github-token')              // From Jenkins credentials
+    GITHUB_TOKEN   = credentials('github')              // From Jenkins credentials
     APP_SERVER_IP  = credentials('app-server-ip')             // From Jenkins credentials
     SSH_KEY_ID     = 'app-server-ssh-key'                     // Credential ID in Jenkins
     APP_PORT       = '3000'
