@@ -58,18 +58,24 @@ pipeline {
           """
 
           // Pull the image to verify it exists (also pre-loads it on Jenkins)
-          def pullResult = sh(
-            script: "docker pull ${env.FULL_IMAGE}",
-            returnStatus: true
-          )
+          def pulled = false
+          for (int i =0; i<10; i++){
+         
+              def pullResult = sh(
+                script: "docker pull ${env.FULL_IMAGE}",
+                returnStatus: true
+              )
 
-          if (pullResult != 0) {
-            error("Image ${env.FULL_IMAGE} not found in GHCR. " +
-                  "Did GitHub Actions finish successfully?")
-          }
+              if (pullResult != 0) {
+                error("Image ${env.FULL_IMAGE} not found in GHCR. " +
+                      "Did GitHub Actions finish successfully?")
+              }
+              echo "image is not ready waiting 30 sec, attempt ${i+1}/10"
+              sleep 30  
 
           echo "Image verified: ${env.FULL_IMAGE}"
         }
+        if (!pulled) {error("Image ${env.FULL_IMAGE} not found in GHCR after 5 minutes.")}
       }
     }
 
