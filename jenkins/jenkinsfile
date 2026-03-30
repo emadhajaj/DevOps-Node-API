@@ -1,0 +1,224 @@
+pipeline {
+
+  // Run on the Jenkins server itself (it has Docker installed)
+  agent any
+
+  // Pipeline-level options
+  options {
+    timeout(time: 30, unit: 'MINUTES')
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    disableConcurrentBuilds()          // Don't run two deploys at once
+    timestamps()
+  }
+
+  // These variables are available to all stages
+  environment {
+    REGISTRY       = "ghcr.io"
+    IMAGE_NAME     = "emadhajaj/devops-node-api"   // CHANGE THIS
+    GITHUB_TOKEN   = credentials('github-token')              // From Jenkins credentials
+    APP_SERVER_IP  = credentials('app-server-ip')             // From Jenkins credentials
+    SSH_KEY_ID     = 'app-server-ssh-key'                     // Credential ID in Jenkins
+    APP_PORT       = '3000'
+    CONTAINER_NAME = 'devops-node-api'
+  }
+
+  stages {
+
+    // ── Stage 1: Checkout ────────────────────────────────────────────────────
+    stage('Checkout') {
+      steps {
+        checkout scm    // Checks out the repo that triggered the build
+        script {
+          // Capture short commit SHA for the image tag
+          env.GIT_SHA_SHORT = sh(
+            script: 'git rev-parse --short HEAD',
+            returnStdout: true
+          ).trim()
+          env.IMAGE_TAG = "sha-${env.GIT_SHA_SHORT}"
+          env.FULL_IMAGE = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
+
+          echo "Deploying image: ${env.FULL_IMAGE}"
+          // Update build display name so it's readable in Jenkins UI
+          currentBuild.displayName = "#${env.BUILD_NUMBER} — ${env.IMAGE_TAG}"
+        }
+      }
+    }
+
+    // ── Stage 2: Verify Image Exists in GHCR ────────────────────────────────
+    // GitHub Actions already built and pushed the image.
+    // Jenkins just needs to verify it's there before deploying.
+    stage('Verify Image in GHCR') {
+      steps {
+        script {
+          // Log in to GHCR from Jenkins
+          sh """
+            echo "${GITHUB_TOKEN}" | docker login ${REGISTRY} \
+              -u "${GITHUB_TOKEN_USR}" \
+              --password-stdin
+          """
+
+          // Pull the image to verify it exists (also pre-loads it on Jenkins)
+          def pullResult = sh(
+            script: "docker pull ${env.FULL_IMAGE}",
+            returnStatus: true
+          )
+
+          if (pullResult != 0) {
+            error("Image ${env.FULL_IMAGE} not found in GHCR. " +
+                  "Did GitHub Actions finish successfully?")
+          }
+
+          echo "Image verified: ${env.FULL_IMAGE}"
+        }
+      }
+    }
+
+    // ── Stage 3: Run Tests Against the Image ────────────────────────────────
+    // Integration test — spin up the container, hit the health endpoint
+    stage('Integration Test') {
+      steps {
+        script {
+          // Start the container with a test port
+          sh """
+            docker run -d \
+              --name ${env.CONTAINER_NAME}-test \
+              --rm \
+              -p 3001:3000 \
+              -e NODE_ENV=test \
+              ${env.FULL_IMAGE}
+          """
+
+          // Wait for the container to be healthy
+          sh 'sleep 5'
+
+          // Hit the health endpoint
+          def healthCheck = sh(
+            script: "curl -sf http://localhost:3001/api/health",
+            returnStatus: true
+          )
+
+          // Stop the test container
+          sh "docker stop ${env.CONTAINER_NAME}-test || true"
+
+          if (healthCheck != 0) {
+            error('Integration test failed: health endpoint did not respond correctly')
+          }
+
+          echo 'Integration test passed!'
+        }
+      }
+      post {
+        always {
+          // Always clean up the test container, even if the stage failed
+          sh "docker stop ${env.CONTAINER_NAME}-test || true"
+          sh "docker rm ${env.CONTAINER_NAME}-test || true"
+        }
+      }
+    }
+
+    // ── Stage 4: Deploy to App Server ────────────────────────────────────────
+    stage('Deploy to App Server') {
+      steps {
+        // Inject the SSH key from Jenkins credentials
+        sshagent(credentials: [env.SSH_KEY_ID]) {
+          script {
+            def deployScript = """
+              set -ex
+
+              # Log in to GHCR on the app server
+              echo "${GITHUB_TOKEN}" | docker login ${REGISTRY} \\
+                -u "${GITHUB_TOKEN_USR}" \\
+                --password-stdin
+
+              # Pull the new image
+              docker pull ${env.FULL_IMAGE}
+
+              # Stop the old container if running
+              docker stop ${env.CONTAINER_NAME} || true
+              docker rm   ${env.CONTAINER_NAME} || true
+
+              # Start the new container
+              docker run -d \\
+                --name ${env.CONTAINER_NAME} \\
+                --restart unless-stopped \\
+                -p ${APP_PORT}:3000 \\
+                -e NODE_ENV=production \\
+                -e APP_VERSION=${env.IMAGE_TAG} \\
+                ${env.FULL_IMAGE}
+
+              # Wait for it to start
+              sleep 5
+
+              # Verify the new container is healthy
+              curl -sf http://localhost:${APP_PORT}/api/health || exit 1
+
+              # Clean up old images (keep last 3)
+              docker images ${REGISTRY}/${IMAGE_NAME} --format '{{.ID}}' | tail -n +4 | xargs -r docker rmi || true
+
+              echo "Deploy successful!"
+            """
+
+            // SSH into the app server and run the deploy script
+            sh """
+              ssh -o StrictHostKeyChecking=no ec2-user@${APP_SERVER_IP} '${deployScript}'
+            """
+
+            // Record deployment info
+            currentBuild.description = "Deployed ${env.IMAGE_TAG} to ${APP_SERVER_IP}"
+          }
+        }
+      }
+    }
+
+    // ── Stage 5: Smoke Test ──────────────────────────────────────────────────
+    stage('Smoke Test') {
+      steps {
+        script {
+          // Hit the real app server from Jenkins to confirm deployment worked
+          def smokeTest = sh(
+            script: "curl -sf http://${APP_SERVER_IP}:${APP_PORT}/api/health",
+            returnStatus: true
+          )
+
+          if (smokeTest != 0) {
+            error('Smoke test failed: deployed app is not responding!')
+          }
+
+          def response = sh(
+            script: "curl -s http://${APP_SERVER_IP}:${APP_PORT}/api/health",
+            returnStdout: true
+          ).trim()
+
+          echo "Smoke test passed! App response: ${response}"
+        }
+      }
+    }
+
+  } // end stages
+
+  // ── Post Actions ─────────────────────────────────────────────────────────
+  post {
+    success {
+      echo """
+        =============================================
+        DEPLOYMENT SUCCESSFUL
+        Image: ${env.FULL_IMAGE}
+        Server: ${env.APP_SERVER_IP}
+        API: http://${env.APP_SERVER_IP}:${env.APP_PORT}/api/health
+        =============================================
+      """
+    }
+    failure {
+      echo "DEPLOYMENT FAILED — Check logs above for details"
+      // In a real project, you'd notify Slack here:
+      // slackSend channel: '#deployments', color: 'danger', message: "Deploy failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+    }
+    always {
+      // Log out of Docker registry
+      sh 'docker logout ${REGISTRY} || true'
+      // Clean workspace
+      cleanWs()
+    }
+  }
+
+}

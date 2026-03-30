@@ -1,0 +1,5 @@
+aws_region            = "us-east-1"
+environment           = "production"
+jenkins_instance_type = "t3.micro"
+app_instance_type     = "t3.micro"
+your_ip               = "156.215.122.78/32"

@@ -1,0 +1,189 @@
+name: CI — Lint, Test, and Publish
+
+on:
+  push:
+    branches: [main, develop, 'feature/**']
+    paths:
+      - 'app/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app/**'
+
+# Global env available to all jobs
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  NODE_VERSION: '18'
+
+# Minimum required permissions
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+
+# Cancel in-progress runs when a new push arrives (save minutes)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ── Job 1: Lint ─────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: app
+        run: npm run lint
+
+  # ── Job 2: Test ─────────────────────────────────────────────────────────────
+  test:
+    name: Test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [16, 18, 20]   # Test on multiple Node versions
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Run tests with coverage
+        working-directory: app
+        run: npm test -- --coverage --coverageReporters=text --coverageReporters=lcov
+        env:
+          NODE_ENV: test
+          CI: true
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: matrix.node == 18   # Only upload coverage once, for the primary version
+        with:
+          name: coverage-report
+          path: app/coverage/
+          retention-days: 7
+
+  # ── Job 3: Build and Push Docker Image ──────────────────────────────────────
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [lint, test]   # Only run if both lint and test pass
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+      full-image: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Set up Docker Buildx for multi-platform builds and BuildKit features
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Log in to GitHub Container Registry using the auto-provided token
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Generate image tags and labels from Git metadata
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Tag with short SHA: sha-a1b2c3d
+            type=sha,prefix=sha-,format=short
+            # Tag with branch name: main, develop
+            type=ref,event=branch
+            # Tag with PR number: pr-42
+            type=ref,event=pr
+            # Tag as 'latest' only on main branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # Build and push with layer caching via GitHub Actions cache
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app              # Build context is the app directory
+          file: ./app/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}  # Don't push on PRs
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha        # Read from GitHub Actions cache
+          cache-to: type=gha,mode=max # Write all layers to cache
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_SHA=${{ github.sha }}
+
+      - name: Image pushed to GHCR
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "Image pushed: ${{ steps.meta.outputs.tags }}"
+          echo "Image digest: ${{ steps.build.outputs.digest }}"
+
+  # ── Job 4: PR Comment ───────────────────────────────────────────────────────
+  pr-comment:
+    name: Comment on PR
+    runs-on: ubuntu-latest
+    needs: [lint, test, build-and-push]
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Comment on PR with build results
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## CI Results
+              | Check | Status |
+              |-------|--------|
+              | Lint  | ✅ Passed |
+              | Tests | ✅ Passed (Node 16, 18, 20) |
+              | Docker Build | ✅ Built successfully |
+
+              **Commit:** \`${{ github.sha }}\`
+              *Image was built but not pushed (PRs don't push to registry)*`
+            })
