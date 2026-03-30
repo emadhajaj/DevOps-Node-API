@@ -127,7 +127,7 @@ pipeline {
 
               # Log in to GHCR on the app server
               echo "${GITHUB_TOKEN}" | docker login ${REGISTRY} \\
-                -u "${GITHUB_TOKEN_USR}" \\
+                -u "emadhajaj" \\
                 --password-stdin
 
               # Pull the new image
