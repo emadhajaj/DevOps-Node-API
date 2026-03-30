@@ -19,3 +19,7 @@ router.get('/info', (req, res) => {
 });
 
 module.exports = router;
+
+router.get('/ready', (req, res) => {
+  res.json({ ready: true, message: 'Application is ready to serve requests' });
+});
